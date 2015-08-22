@@ -1,0 +1,143 @@
+---
+title: "Prediction of Barbell Lift Performance"
+author: "Paul Chrisman"
+output: html_document
+---
+
+##Overview
+
+Data collected from accelerometers located on the belt, forearm, arm and dumbell of test subjects is used to predict the quality of weightlifting exercises performed.  Performance will be classified as correct (A) or one of 4 types of error (B-E).  A random forest model will be trained on a portion of the data provided, and then tested against another portion which was held back to evaluate the likely accuracy and error rates.  Finally the model will be used to predict 20 test cases.  Data used is provided at http://groupware.les.inf.puc-rio.br/har.
+
+
+###Data
+
+
+```{r, warning=FALSE, message=FALSE}
+library(caret)
+library(dplyr)
+library(randomForest)
+set.seed(81477)
+
+```
+
+After loading the packages (and setting a seed to make results reproducible) we will utilize for the project we must next download the data files.
+
+```{r, cache =TRUE,warning=FALSE}
+dir.create("temp_PML_proj")
+setwd("temp_PML_proj")
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", "pml_training.csv", method = "curl")
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", "pml_testing.csv", method = "curl")
+training_data <- read.csv("~/temp_PML_proj/pml_training.csv", stringsAsFactors=FALSE)
+testing_data <- read.csv("~/temp_PML_proj/pml_testing.csv", stringsAsFactors=FALSE)
+```
+
+Next we need to examine our data and see what we are working with.
+
+```{r}
+dim(training_data)
+dim(testing_data)
+```
+
+So we can see that the training data consists of 19622 observations of 160 variables, while the test file contains 20 observations of the same variables (save that classe, the varibale we are trying to predict, is replaced by problem_id).  What type of info is contained in each variable?  We will look at the first 20 variables to give us some idea.
+
+```{r}
+glimpse(training_data[,1:20])
+```
+
+From this a few issues are immediately clear.  Some of the variables have imported in as characters rather than numbers, and others variables have many NA values.  Both are problems that we will need to deal with.  First we will change the type of the character variables to numeric (note that the method used here is possible because all variables are numeric, and would have to be altered if that were not the case).
+
+```{r, warning=FALSE}
+for (i in 7:159){
+    temp_data <- training_data[,i]
+    new_data <- sapply(temp_data,as.numeric)
+    training_data[,i] <- new_data
+}
+for (i in 7:159){
+    temp_data <- testing_data[,i]
+    new_data <- sapply(temp_data,as.numeric)
+    testing_data[,i] <- new_data
+}
+glimpse(training_data[,1:20])
+```
+So now we can see that the variables have all been converted to numeric, but what about the NAs.  Examination of the variables will show that they are extremely pervasive, in some cases covering all of the observations.
+
+```{r}
+sum(is.na(training_data$max_roll_belt)*1)
+sum(is.na(training_data$skewness_yaw_belt)*1)
+```
+The source material for the data tells us that some of the observations are summaries over time windows, and are not reported for the individual time points.  We could try to impute values for some of these, but given how pervasive the NAs are, it seems safer to just drop these variables.  Indeed examination of the test data would show that these values are all NA there, so they will be no use to us in making our final predictions.  So we will drop all of these variables out of our data.  Additionally we will drop some of the initial descriptive variables that are also not useful to us in making our prediction.  We will also convert our classe (prediction target) variable to a factor variable now.
+
+```{r}
+use_cols <- as.vector(!is.na(training_data[1,]))
+training_data <- training_data[,use_cols]
+testing_data <- testing_data[,use_cols]
+training_data <- training_data[,c(8:60)]
+testing_data <- testing_data[,c(8:60)]
+training_data$classe <- as.factor(training_data$classe)
+dim(training_data)
+```
+
+We can now check our remaining data for any NA values, as using a random forest for our prediction model requires that we not have any NA values.
+
+```{r}
+NAcount <- vector("numeric",52)
+for (i in 1:52){
+    NAcount[i] <- sum(is.na(training_data[,i])*1)
+}
+sum(NAcount)
+```
+The final step before proceeding to modeling is to divide our data into training and test sets (separate from our final test set).  We do this so that we can evaluate the fit of our model on data that was not used to build it, and gain a more realistic estimate of its accuracy and error rate.  We will use 70% of the data for training and the remaining 30% for testing.
+
+```{r}
+train_choice <- createDataPartition(training_data$classe, p = 0.7, list = FALSE)
+train_set <- training_data[train_choice,]
+test_set <- training_data[-train_choice,]
+dim(train_set)
+dim(test_set)
+```
+
+###Modeling
+
+Having prepared our data we can now train our random forest model using the training set.  Because we are using a random forest we do not need to explicitly set up cross validation, because we can use the out-of-bag error estimate.  Each tree of our random forest is built from a bootstrap sample of the data that does not include all of the data points.  By running those "out-of-bag" samples through our resulting tree we can estimate the error rate for points not included in the model.  Averaging over all of the trees, all of the observations will be left out a roughly equivalent amount of the time.  Studies have shown that this provides an unbiased error estimate.  In fact for random forests it is not even strictly necessary that we have a separate testing data set to use, but we do so here to illustrate the general practice.
+
+```{r, cache=TRUE}
+ctrl = trainControl(method = "oob")
+forest_grid <- data.frame(mtry = c(4,8,12,16))
+model <- train(classe~., data = train_set, method = "rf", trControl = ctrl, tuneGrid = forest_grid)
+```
+
+The main parameter to play with in a random forest is the "mtry" parameter, which determines the number of variables looked at at each node of each tree.  At each node of each tree in the forest mtry variables are randomly selectd, and the one with the most discriminatory power is chosen.  This random sampling helps to reduce the dominance of the most important variables and provide a better spread in the coverage of the data.  mtry is often found to be best around the square root of the number of variables in the model, so as we have 52 variables, an mtry of 7 or 8 would be sugggested.  We selected a small range of values around that to try in our train function.  If we examine the results of the model we can see that in fact 8 did work best (although all of the values gave high accuracy).  The number of trees is also a variable that could be altered, but the caret package defaults to 500, and does not allow for easy variation of that (and it works fine for our case). 
+
+```{r}
+model
+```
+
+If we examine the final model, we can see what error rate was predicted from the out of bag estimate.  We can also look at which variables were found to be important for the model using the varImp function (essentially a measurement of how much predictive power is lost if a variable is randomly permuted).
+
+```{r}
+model$finalModel
+varImp(model)
+```
+
+So we can see that the estimated oob error rate is 0.5%.  The most important variable was roll_belt, followed by yaw_belt, pitch_forearm and magnet_dumbell_z.
+
+###Test Set
+
+Now we can try using the model on the test set we held out of the training data, and see how it performs there.
+
+```{r}
+predictions <- predict(model, newdata = test_set)
+confusionMatrix(predictions, test_set$classe)
+```
+Here again the accuracy is above 99%, and the error rate is very similar to the oob error estimate above.
+
+The only task we have left is to predict the 20 blind samples provided.
+
+```{r}
+blind_predictions <- data.frame(id = testing_data$problem_id, prediction = predict(model, newdata = testing_data))
+blind_predictions
+```
+
+
+
+
